@@ -1,22 +1,227 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-file
-*.flf
-#Test results file
-TestResults.xml
+# ══════════════════════════════════════════════════════════════════════════════
+# SYMBA — Titans + MiRAS Configuration File
+# Feynman Amplitude → Squared Amplitude (QED & QCD)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# All hyperparameters, paths, and training settings are centralised here.
+# Every notebook reads this file at the top so changing one value propagates
+# to all runs automatically.
+#
+# Usage in notebooks:
+#   import yaml
+#   with open('config.yaml') as f:
+#       CFG = yaml.safe_load(f)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  raw_data_dir:        "./data/raw"               # folder containing 17 .txt files
+  processed_pkl:       "./data/processed/processed_data.pkl"
+  ckpt_dir:            "./ckpt"
+  eval_results_dir:    "./eval_results"
+  pretrained_encoder:  "./ckpt/pretrained_encoder.pth"
+  pretrained_tgt_embed: "./ckpt/pretrained_tgt_embed.pth"
+
+  # Fine-tuned checkpoint naming convention: {ckpt_dir}/{ARCH}_{LABEL}best.pth
+  # e.g. ./ckpt/MAC_QEDbest.pth
+
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+
+
+# ── Data / Preprocessing ──────────────────────────────────────────────────────
+data:
+  # Train / val / test split fractions (must sum to 1.0)
+  train_frac: 0.80
+  val_frac:   0.10
+  test_frac:  0.10
+
+  # Sequence length cap — computed dynamically as min(p97 + 4, max_seq_len)
+  # Set to null to compute from data; or override with a fixed integer
+  src_max_len: null       # null → auto from 97th percentile of training amp lengths
+  tgt_max_len: null       # null → auto from 97th percentile of training sq lengths
+  half_max_len: null      # null → auto from 97th percentile of half-split lengths
+  max_seq_len_cap: 512    # hard ceiling regardless of percentile
+
+  # Percentile used for automatic length computation
+  length_percentile: 97
+
+  # Tokenizer index pool sizes
+  index_pool_size: 1000   # max unique tensor index names (INDEX_0 … INDEX_999)
+
+  # Special token definitions (order matters — index = position in this list)
+  special_symbols:
+    - "<PAD>"     # 0
+    - "<UNK>"     # 1
+    - "<BOS>"     # 2
+    - "<EOS>"     # 3
+    - "<SEP>"     # 4
+    - "<TERM0>"   # 5
+    - "<TERM1>"   # 6
+
+  # Derived special token indices (do not change unless special_symbols order changes)
+  pad_idx:  0
+  unk_idx:  1
+  bos_idx:  2
+  eos_idx:  3
+  sep_idx:  4
+
+  # DataLoader settings
+  num_workers: 2          # set to 0 if multiprocessing causes issues in Colab
+  pin_memory: true
+
+
+# ── Model Architecture ────────────────────────────────────────────────────────
+model:
+  # Core dimensions
+  dim: 128                # model hidden dimension
+  num_heads: 8            # attention heads  (head_dim = dim / num_heads = 16)
+  ffn_mult: 4.0           # FFN inner dim = dim * ffn_mult = 512
+  num_encoder_layers: 2   # number of Titans encoder blocks stacked
+  num_decoder_layers: 2   # number of standard Transformer decoder layers
+
+  # Derived (computed automatically from dim and ffn_mult — do not override)
+  # head_dim: 16
+  # ffn_dim:  512
+
+  # NeuralLTM memory hyperparameters
+  num_memory_layers: 1          # depth of the MemoryMLP inside NeuralLTM
+  memory_hidden_mult: 1.0       # MemoryMLP hidden dim = dim * memory_hidden_mult
+  memory_lr: 0.05               # online learning rate θ for memory weight update
+  memory_momentum: 0.90         # momentum η for memory weight update
+  memory_decay: 0.01            # weight decay α for memory weight update
+
+  # Chunked encoder (NeuralLTM processes input in chunks of this size)
+  chunk_size: 64
+
+  # Persistent memory tokens (MAC architecture only)
+  num_persistent_tokens: 4      # set to 0 to disable
+
+  # Sliding-window attention (MAG and MAL architectures)
+  window_size: 64               # tokens in each side of the local attention window
+
+  # MiRAS router
+  miras_router_dim: 32          # hidden dim of the 2-layer router MLP
+  # Router is initialized with w2=zeros → initial gate = sigmoid(0) = 0.5
+
+  # Positional encoding
+  use_rope: true                # Rotary Position Embedding on Q and K
+  max_seq_len: 600              # RoPE buffer size (must be >= SRC_MAX + chunk overhead)
+
+  # Initialization
+  init_std: 0.02                # std for normal weight init (embedding, projections)
+
+  # Regularization
+  dropout: 0.10                 # applied to attention, FFN, router, drop layers
+
+  # Vocabulary sizes — filled automatically from pkl per label; listed here for reference
+  # src_vocab_size: (set per label from pkl)
+  # tgt_vocab_size: (set per label from pkl)
+
+
+# ── Pretraining ───────────────────────────────────────────────────────────────
+pretraining:
+  # Phase 1 — Encoder language model on amplitude token halves
+  phase1:
+    epochs: 30
+    batch_size: 4
+    grad_accum_steps: 4         # effective batch = 4 × 4 = 16
+    optimizer_lr: 3.0e-4
+    weight_decay: 1.0e-4
+    optimizer_eps: 1.0e-9
+    warmup_ratio: 0.10          # fraction of total steps used for linear warmup
+    end_lr: 1.0e-6              # minimum LR at end of decay
+    clip_grad_norm: 1.0
+    architecture: "MAC"         # architecture used for the temporary pretraining encoder
+
+  # Phase 2 — Decoder embedding pretext (sq-amp first half → second half)
+  phase2:
+    epochs: 30
+    batch_size: 4
+    grad_accum_steps: 4
+    optimizer_lr: 3.0e-4
+    weight_decay: 1.0e-4
+    optimizer_eps: 1.0e-9
+    warmup_ratio: 0.10
+    end_lr: 1.0e-6
+    clip_grad_norm: 1.0
+
+  # Data: combine QED + QCD training + validation splits for both phases
+  combine_qed_qcd: true
+  include_validation_in_pretrain: true
+
+
+# ── Fine-tuning ───────────────────────────────────────────────────────────────
+finetuning:
+  epochs: 120
+  batch_size: 4
+  grad_accum_steps: 4           # effective batch = 16
+  optimizer_lr: 3.0e-4
+  weight_decay: 1.0e-4
+  optimizer_eps: 1.0e-9
+  warmup_ratio: 0.10
+  end_lr: 1.0e-6
+  clip_grad_norm: 1.0
+  label_smoothing: 0.10         # CrossEntropyLoss label smoothing
+
+  # Mixed precision
+  dtype: "bfloat16"             # "bfloat16" on CUDA, "float32" on CPU
+
+  # Checkpoint: save best model by validation loss
+  save_criterion: "va_loss"     # "va_loss" | "va_ppl" | "va_tok_acc"
+
+  # Architectures and labels to fine-tune (all 8 combinations)
+  architectures: ["MAC", "MAG", "MAL", "LMM"]
+  labels: ["QED", "QCD"]
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+evaluation:
+  batch_size: 8
+
+  # Decoding
+  greedy_decode: true
+  beam_decode: true
+  beam_width: 4
+
+  # Metrics computed on test set
+  metrics:
+    - ce_loss
+    - ppl
+    - tok_acc
+    - seq_acc
+    - mean_ed
+    - median_ed
+    - exact_matches
+
+  # Number of qualitative examples to show per model
+  n_qualitative_examples: 5
+
+  # Save outputs
+  save_csv: true
+  save_json: true
+  save_plots: true
+
+
+# ── Ablation Study ────────────────────────────────────────────────────────────
+ablation:
+  # All 8 models evaluated; results compared across architectures and labels
+  # Plots generated: bar charts, radar chart, heatmap, training curves overlay
+  plot_dpi: 150
+  figure_format: "png"
+
+  # Training curve overlay — which metrics to plot per label
+  curve_metrics:
+    - tr_loss
+    - va_loss
+    - va_ppl
+    - va_tok_acc
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  print_every_n_epochs: 10      # print training log every N epochs
+  print_first_epoch: true       # always print epoch 1 regardless
+  save_history_in_checkpoint: true
