@@ -1,6 +1,6 @@
-# SYMBA — Titans + MiRAS: Feynman Amplitude → Squared Amplitude
+# SYMBA — Titans + MiRAS:  Amplitude → Squared Amplitude
 
-> Sequence-to-sequence symbolic regression on Feynman diagram amplitudes
+> Sequence-to-sequence amplitude to squared amplitude
 > using four Titans neural memory architectures enhanced with MiRAS routing.
 > Built for GSoC 2026 — ML4Sci organization.
 
