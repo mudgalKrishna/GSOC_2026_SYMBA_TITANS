@@ -101,4 +101,4 @@ GPU recommended — tested on Colab T4 (15.6 GB VRAM).
 
 ## License
 
-MIT — see `LICENSE` for details.s.
+Apache Licence 2.0— see `LICENSE` for details.s.
